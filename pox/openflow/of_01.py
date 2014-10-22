@@ -190,6 +190,12 @@ class DefaultOpenFlowHandlers (OpenFlowHandlers):
       con.raiseEventNoErrors(PortStatus, con, msg)
 
   @staticmethod
+  def handle_PORT_STATS (con,msg):
+    e = con.ofnexus.raiseEventNoErrors(PortStats, con, msg)
+    if e is None:
+      con.raiseEventNoErrors(PortStats,con,msg)
+
+  @staticmethod
   def handle_PACKET_IN (con, msg): #A
     e = con.ofnexus.raiseEventNoErrors(PacketIn, con, msg)
     if e is None or e.halt != True:
@@ -711,6 +717,7 @@ class Connection (EventMixin):
     FlowRemoved,
     FeaturesReceived,
     ConfigurationReceived,
+    PortStats,
   ])
 
   # Globally unique identifier for the Connection instance
