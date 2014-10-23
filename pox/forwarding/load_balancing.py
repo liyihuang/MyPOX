@@ -38,6 +38,7 @@ import time
 
 log = core.getLogger()
 
+NUMBER = 0
 # Adjacency map.  [sw1][sw2] -> port from sw1 to sw2
 adjacency = defaultdict(lambda:defaultdict(lambda:None))
 
@@ -47,8 +48,20 @@ switches = {}
 # ethaddr -> (switch, port)
 mac_map = {}
 
+port_tx_congestion = defaultdict(lambda: defaultdict(lambda:None))
+
+all_path_tx_congestion = False
 # [sw1][sw2] -> (distance, intermediate)
 path_map = defaultdict(lambda:defaultdict(lambda:(None,None)))
+
+round_robin = defaultdict(lambda: defaultdict(lambda: []))
+used_round_robin = defaultdict(lambda: defaultdict(lambda: []))
+
+will_round_robin= defaultdict(lambda: defaultdict(lambda: []))
+
+best_path = defaultdict(lambda: defaultdict(lambda: []))
+current_path = defaultdict(lambda: defaultdict(lambda: []))
+
 
 # Waiting path.  (dpid,xid)->WaitingPath
 waiting_paths = {}
@@ -64,61 +77,86 @@ FLOW_HARD_TIMEOUT = 30
 PATH_SETUP_TIME = 4
 
 
-def _calc_paths ():
-  """
-  Essentially Floyd-Warshall algorithm
-  """
-
-  def dump ():
+def _init_tx_congestion():
+    sws = switches.values()
     for i in sws:
-      for j in sws:
-        a = path_map[i][j][0]
-        #a = adjacency[i][j]
-        if a is None: a = "*"
-        print a,
-      print
+        for j in sws:
+            if adjacency[i][j] is not None:
+                port_tx_congestion[i][adjacency[i][j]] = True
 
-  sws = switches.values()
-  path_map.clear()
-  for k in sws:
-    for j,port in adjacency[k].iteritems():
-      if port is None: continue
-      path_map[k][j] = (1,None)
-    path_map[k][k] = (0,None) # distance, intermediate
+def _calc_paths():
+    def _get_node_list(src, dst):
+        if src is dst:
+            # We're here!
+            return []
+
+        if path_map[src][dst][0] is None:
+            return None
+        intermediate = path_map[src][dst][1]
+        if intermediate is None:
+            return []
+        return _get_raw_path(src, intermediate) + [intermediate] + \
+               _get_raw_path(intermediate, dst)
+
+    sws = switches.values()
+    path_map.clear()
+    for k in sws:
+        for j, port in adjacency[k].iteritems():
+            if port is None: continue
+            path_map[k][j] = (1, None)
+        path_map[k][k] = (0, None)  # distance, intermediate
 
   #dump()
 
-  for k in sws:
+    for k in sws:
+        for i in sws:
+            for j in sws:
+                if path_map[i][k][0] is not None:
+                    if path_map[k][j][0] is not None:
+                        # i -> k -> j exists
+                        ikj_dist = path_map[i][k][0] + path_map[k][j][0]
+                        if path_map[i][j][0] is None or ikj_dist < path_map[i][j][0]:
+                            # i -> k -> j is better than existing
+                            path_map[i][j] = (ikj_dist, k)
+
+                            #print "--------------------"
+                            #dump()
+
+
     for i in sws:
-      for j in sws:
-        if path_map[i][k][0] is not None:
-          if path_map[k][j][0] is not None:
-            # i -> k -> j exists
-            ikj_dist = path_map[i][k][0]+path_map[k][j][0]
-            if path_map[i][j][0] is None or ikj_dist < path_map[i][j][0]:
-              # i -> k -> j is better than existing
-              path_map[i][j] = (ikj_dist, k)
+        for j in sws:
+            best_path[i][j] = _get_node_list(i, j)
+            round_robin[i][j].append(path_map[i][j][1])
 
-  #print "--------------------"
-  #dump()
+    for k in sws:
+        for i in sws:
+            for j in sws:
+                if path_map[i][k][0] is not None:
+                    if path_map[k][j][0] is not None:
+                        distance = path_map[i][k][0] + path_map[k][j][0]
+                        if distance == path_map[i][j][0] and k != path_map[i][j][1] and k != i and k != j:
+                            path_map[i][j] = (distance, k)
+                            current_path[i][j] = _get_node_list(i, j)
+                            if current_path[i][j] != best_path[i][j]:
+                                round_robin[i][j].append(k)
 
 
-def _get_raw_path (src, dst):
-  """
+def _get_raw_path(src, dst):
+    """
   Get a raw path (just a list of nodes to traverse)
   """
-  if len(path_map) == 0: _calc_paths()
-  if src is dst:
-    # We're here!
-    return []
-  if path_map[src][dst][0] is None:
-    return None
-  intermediate = path_map[src][dst][1]
-  if intermediate is None:
-    # Directly connected
-    return []
-  return _get_raw_path(src, intermediate) + [intermediate] + \
-         _get_raw_path(intermediate, dst)
+    #if len(path_map) == 0: _calc_paths()
+    if src is dst:
+        # We're here!
+        return []
+    if path_map[src][dst][0] is None:
+        return None
+    intermediate = path_map[src][dst][1]
+    if intermediate is None:
+        # Directly connected
+        return []
+    return _get_raw_path(src, intermediate) + [intermediate] + \
+           _get_raw_path(intermediate, dst)
 
 
 def _check_path (p):
@@ -135,30 +173,55 @@ def _check_path (p):
   return True
 
 
-def _get_path (src, dst, first_port, final_port):
-  """
+def _get_path(src, dst, first_port, final_port, match):
+    """
   Gets a cooked path -- a list of (node,in_port,out_port)
   """
-  # Start with a raw path...
-  if src == dst:
-    path = [src]
-  else:
-    path = _get_raw_path(src, dst)
-    if path is None: return None
-    path = [src] + path + [dst]
+    # Start with a raw path...
+    print '-----------------------------------------------------------------'
+    print 'source is ' + str(match._nw_src)
+    print 'dest is ' + str(match._nw_dst)
+    print 'type is ' + str(match._dl_type)
+    print  'the protocol is ' + str(match._nw_proto)
+    global  all_path_tx_congestion
+    while True:
+        if src == dst:
+            path = [src]
+        else:
+            if len(path_map) ==0:
+                _calc_paths()
+                _init_tx_congestion()
+            path = _get_raw_path(src, dst)
+            if path is None: return None
+            path = [src] + path + [dst]
 
-  # Now add the ports
-  r = []
-  in_port = first_port
-  for s1,s2 in zip(path[:-1],path[1:]):
-    out_port = adjacency[s1][s2]
-    r.append((s1,in_port,out_port))
-    in_port = adjacency[s2][s1]
-  r.append((dst,in_port,final_port))
+        # Now add the ports
+        r = []
+        in_port = first_port
+        for s1, s2 in zip(path[:-1], path[1:]):
+            out_port = adjacency[s1][s2]
+            r.append((s1, in_port, out_port))
+            in_port = adjacency[s2][s1]
+        r.append((dst, in_port, final_port))
+        print 'all_path_tx_congestion is ' + str(all_path_tx_congestion)
 
-  assert _check_path(r), "Illegal path!"
+        assert _check_path(r), "Illegal path!"
+        port_tx_congestion_list = []
+        for x in r[:-1]:
+            if port_tx_congestion[x[0]][x[-1]] is not None:
+                port_tx_congestion_list.append(port_tx_congestion[x[0]][x[-1]])
 
-  return r
+        print 'port_tx_congestion_list is' + str(port_tx_congestion_list)
+
+        if all(port_tx_congestion_list):
+            return r
+        else:
+            if used_round_robin[src][dst] == round_robin[src][dst]:
+                del used_round_robin[src][dst][:]
+                return None
+            will_round_robin[src][dst] = [x for x in round_robin[src][dst] if x not in used_round_robin[src][dst]]
+            path_map[src][dst] = (path_map[src][dst][0],will_round_robin[src][dst][0])
+            used_round_robin[src][dst].append(will_round_robin[src][dst][0])
 
 
 class WaitingPath (object):
@@ -259,7 +322,7 @@ class Switch (EventMixin):
     """
     Attempts to install a path between this switch and some destination
     """
-    p = _get_path(self, dst_sw, event.port, last_port)
+    p = _get_path(self, dst_sw, event.port, last_port, match)
     if p is None:
       log.warning("Can't get from %s to %s", match.dl_src, match.dl_dst)
 
