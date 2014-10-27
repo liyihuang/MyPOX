@@ -443,7 +443,7 @@ class Switch (EventMixin):
         flood()
       else:
         dest = mac_map[packet.dst]
-        match = of.ofp_match.from_packet(packet)
+        match = of.ofp_match.from_packet(packet,spec_frags= True)
         self.install_path(dest[0], dest[1], match, event)
 
   def disconnect (self):
