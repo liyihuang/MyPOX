@@ -178,11 +178,11 @@ def _get_path(src, dst, first_port, final_port, match):
   Gets a cooked path -- a list of (node,in_port,out_port)
   """
     # Start with a raw path...
-    print '-----------------------------------------------------------------'
-    print 'source is ' + str(match._nw_src)
-    print 'dest is ' + str(match._nw_dst)
-    print 'type is ' + str(match._dl_type)
-    print  'the protocol is ' + str(match._nw_proto)
+    #print '-----------------------------------------------------------------'
+    #print 'source is ' + str(match._nw_src)
+    #print 'dest is ' + str(match._nw_dst)
+    #print 'type is ' + str(match._dl_type)
+    #print  'the protocol is ' + str(match._nw_proto)
     global  all_path_tx_congestion
     while True:
         if src == dst:
@@ -203,7 +203,8 @@ def _get_path(src, dst, first_port, final_port, match):
             r.append((s1, in_port, out_port))
             in_port = adjacency[s2][s1]
         r.append((dst, in_port, final_port))
-        print 'all_path_tx_congestion is ' + str(all_path_tx_congestion)
+        #print r
+        #print 'all_path_tx_congestion is ' + str(all_path_tx_congestion)
 
         assert _check_path(r), "Illegal path!"
         port_tx_congestion_list = []
@@ -211,7 +212,7 @@ def _get_path(src, dst, first_port, final_port, match):
             if port_tx_congestion[x[0]][x[-1]] is not None:
                 port_tx_congestion_list.append(port_tx_congestion[x[0]][x[-1]])
 
-        print 'port_tx_congestion_list is' + str(port_tx_congestion_list)
+        #print 'port_tx_congestion_list is' + str(port_tx_congestion_list)
 
         if all(port_tx_congestion_list):
             return r
@@ -560,6 +561,8 @@ class l2_multi (EventMixin):
     #log.debug("Notify waiting packet %s,%s", event.dpid, event.xid)
     wp.notify(event)
 
+  def _handle_openflow_PortStats(self, event):
+    print 'switch is ' + str(event.dpid) + ' port number is ' +str(event.ofp.port_no) + ' congestion bit is ' + str(event.ofp.tx_congestion)
 
 def launch ():
   core.registerNew(l2_multi)
