@@ -53,7 +53,7 @@ def _calc_spanning_tree ():
   is the port on DPID1 connecting to DPID2.
   """
   def flip (link):
-    return Discovery.Link(link[2],link[3], link[0],link[1])
+    return Discovery.Link(link[2], link[3], link[0], link[1], link[4])
 
   adj = defaultdict(lambda:defaultdict(lambda:[]))
   switches = set()
@@ -155,7 +155,6 @@ def _handle_ConnectionUp (event):
 
 def _handle_LinkEvent (event):
   # When links change, update spanning tree
-
   (dp1,p1),(dp2,p2) = event.link.end
   if _prev[dp1][p1] is False:
     if _prev[dp2][p2] is False:

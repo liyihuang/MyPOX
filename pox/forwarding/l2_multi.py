@@ -425,7 +425,7 @@ class l2_multi (EventMixin):
 
   def _handle_openflow_discovery_LinkEvent (self, event):
     def flip (link):
-      return Discovery.Link(link[2],link[3], link[0],link[1])
+      return Discovery.Link(link[2],link[3], link[0],link[1],link[4])
 
     l = event.link
     sw1 = switches[l.dpid1]
