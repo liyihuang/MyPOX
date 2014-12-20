@@ -275,12 +275,18 @@ class Link (namedtuple("LinkBase",("dpid1","port1","dpid2","port2","link_type"))
     return ((self[0],self[1]),(self[2],self[3]))
 
   def __str__ (self):
-    return "%s.%s -> %s.%s, type %s" % (dpid_to_str(self[0]),self[1],
-                               dpid_to_str(self[2]),self[3],self[4])
+    return "%s.%s -> %s.%s" % (dpid_to_str(self[0]),self[1],
+                               dpid_to_str(self[2]),self[3])
 
   def __repr__ (self):
-    return "Link(dpid1=%s,port1=%s, dpid2=%s,port2=%s), type = %s" % (self.dpid1,
+    return "Link(dpid1=%s,port1=%s, dpid2=%s,port2=%s,type=%s)" % (self.dpid1,
         self.port1, self.dpid2, self.port2,self.link_type)
+
+  def __eq__(self, other):
+    return other.dpid1 == self.dpid1 and other.dpid2 == self.dpid2 and other.port1 == self.port1 and other.port2 == self.port2
+
+  def __hash__(self):
+    return self.dpid1 + self.dpid2 + self.port1 + self.port2
 
 
 class Discovery (EventMixin):
@@ -310,6 +316,7 @@ class Discovery (EventMixin):
     if link_timeout: self._link_timeout = link_timeout
 
     self.adjacency = {} # From Link to time.time() stamp
+    self.link_attribute = {}
     self._sender = LLDPAndBroadcastSender(self.send_cycle_time)
 
     # Listen with a high priority (mostly so we get PacketIns early)
@@ -488,16 +495,23 @@ class Discovery (EventMixin):
         return EventHalt
 
       link = Discovery.Link(originatorDPID, originatorPort, event.dpid, event.port,link_type)
-      print link.link_type
-
       if link not in self.adjacency:
         self.adjacency[link] = time.time()
-        log.info('link detected: %s', link)
+        self.link_attribute[link] = link
+        log.info('link detected: %s and the type is %s', link, link.link_type)
         self.raiseEventNoErrors(LinkEvent, True, link, event)
-        print self.adjacency
       else:
+        if link.link_type is self.link_attribute[link].link_type:
+          self.adjacency[link] = time.time()
+        elif link.link_type is 'broadcast' and self.link_attribute[link].link_type is 'lldp':
+          pass
+        elif link.link_type is 'lldp' and self.link_attribute[link].link_type is 'broadcast':
+          self.link_attribute[link] = link
+          self.raiseEventNoErrors(LinkEvent,False,link)
+          del self.adjacency[link]
+          self.adjacency[link] = time.time()
+          self.raiseEventNoErrors(LinkEvent,True,link,event)
         # Just update timestamp
-        self.adjacency[link] = time.time()
 
       return EventHalt # Probably nobody else needs this event
 
