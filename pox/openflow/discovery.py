@@ -169,7 +169,7 @@ class LLDPAndBroadcastSender (object):
     if packet_type == 'lldp':
       eth = self._create_discovery_packet(dpid, port_num, port_addr, self._ttl)
     elif packet_type == 'broadcast':
-      eth = self._create_broadcast_discovery_packet(dpid, port_num, port_addr, self._ttl)
+      eth = self._create_broadcast_discovery_packet(dpid, port_num, port_addr, 120)
     else:
       return None
       log.warning('Not the broadcast or the lldp')
@@ -204,7 +204,7 @@ class LLDPAndBroadcastSender (object):
 
     eth = pkt.ethernet(type=pkt.ethernet.LLDP_TYPE)
     eth.src = port_addr
-    eth.dst = pkt.ETHERNET.NDP_MULTICAST
+    eth.dst = pkt.ETHERNET.LLDP_MULTICAST
     eth.payload = discovery_packet
 
     return eth
@@ -275,8 +275,8 @@ class Link (namedtuple("LinkBase",("dpid1","port1","dpid2","port2","link_type"))
     return ((self[0],self[1]),(self[2],self[3]))
 
   def __str__ (self):
-    return "%s.%s -> %s.%s" % (dpid_to_str(self[0]),self[1],
-                               dpid_to_str(self[2]),self[3])
+    return "%s.%s -> %s.%s and link_type is %s" % (dpid_to_str(self[0]),self[1],
+                               dpid_to_str(self[2]),self[3],self[4])
 
   def __repr__ (self):
     return "Link(dpid1=%s,port1=%s, dpid2=%s,port2=%s,type=%s)" % (self.dpid1,
@@ -341,7 +341,7 @@ class Discovery (EventMixin):
       con = con_or_dpid
 
     match = of.ofp_match(dl_type = pkt.ethernet.LLDP_TYPE,
-                          dl_dst = pkt.ETHERNET.NDP_MULTICAST)
+                          dl_dst = pkt.ETHERNET.LLDP_MULTICAST)
     msg = of.ofp_flow_mod()
     msg.priority = priority
     msg.match = match
@@ -379,11 +379,10 @@ class Discovery (EventMixin):
     """
     Receive and process LLDP packets
     """
-
     packet = event.parsed
 
     if (packet.effective_ethertype != pkt.ethernet.LLDP_TYPE
-          or (packet.dst != pkt.ETHERNET.NDP_MULTICAST and packet.dst != pkt.ETHERNET.ETHER_BROADCAST)):
+          or (packet.dst != pkt.ETHERNET.LLDP_MULTICAST and packet.dst != pkt.ETHERNET.ETHER_BROADCAST)):
       if not self._eat_early_packets: return
       if not event.connection.connect_time: return
       enable_time = time.time() - self.send_cycle_time - 1
@@ -392,128 +391,129 @@ class Discovery (EventMixin):
       return
 
     if (packet.effective_ethertype == pkt.ethernet.LLDP_TYPE
-        and packet.dst == pkt.ETHERNET.NDP_MULTICAST or pkt.ETHERNET.ETHER_BROADCAST):
-      link_type = 'lldp' if packet.dst == pkt.ETHERNET.ETHER_BROADCAST else 'broadcast'
+        and packet.dst == pkt.ETHERNET.LLDP_MULTICAST or pkt.ETHERNET.ETHER_BROADCAST):
+      link_type = 'lldp' if packet.dst == pkt.ETHERNET.LLDP_MULTICAST else 'broadcast'
 
-      if self._explicit_drop:
-        if event.ofp.buffer_id is not None:
-          log.debug("Dropping LLDP packet %i", event.ofp.buffer_id)
-          msg = of.ofp_packet_out()
-          msg.buffer_id = event.ofp.buffer_id
-          msg.in_port = event.port
-          event.connection.send(msg)
+    if self._explicit_drop:
+      if event.ofp.buffer_id is not None:
+        log.debug("Dropping LLDP packet %i", event.ofp.buffer_id)
+        msg = of.ofp_packet_out()
+        msg.buffer_id = event.ofp.buffer_id
+        msg.in_port = event.port
+        event.connection.send(msg)
 
-      lldph = packet.find(pkt.lldp)
+    lldph = packet.find(pkt.lldp)
 
-      if lldph is None or not lldph.parsed:
-        log.error("LLDP packet could not be parsed")
-        return EventHalt
-      if len(lldph.tlvs) < 3:
-        log.error("LLDP packet without required three TLVs")
-        return EventHalt
-      if lldph.tlvs[0].tlv_type != pkt.lldp.CHASSIS_ID_TLV:
-        log.error("LLDP packet TLV 1 not CHASSIS_ID")
-        return EventHalt
-      if lldph.tlvs[1].tlv_type != pkt.lldp.PORT_ID_TLV:
-        log.error("LLDP packet TLV 2 not PORT_ID")
-        return EventHalt
-      if lldph.tlvs[2].tlv_type != pkt.lldp.TTL_TLV:
-        log.error("LLDP packet TLV 3 not TTL")
-        return EventHalt
+    if lldph is None or not lldph.parsed:
+      log.error("LLDP packet could not be parsed")
+      return EventHalt
+    if len(lldph.tlvs) < 3:
+      log.error("LLDP packet without required three TLVs")
+      return EventHalt
+    if lldph.tlvs[0].tlv_type != pkt.lldp.CHASSIS_ID_TLV:
+      log.error("LLDP packet TLV 1 not CHASSIS_ID")
+      return EventHalt
+    if lldph.tlvs[1].tlv_type != pkt.lldp.PORT_ID_TLV:
+      log.error("LLDP packet TLV 2 not PORT_ID")
+      return EventHalt
+    if lldph.tlvs[2].tlv_type != pkt.lldp.TTL_TLV:
+      log.error("LLDP packet TLV 3 not TTL")
+      return EventHalt
 
-      def lookInSysDesc ():
-        r = None
-        for t in lldph.tlvs[3:]:
-          if t.tlv_type == pkt.lldp.SYSTEM_DESC_TLV:
-            # This is our favored way...
-            for line in t.payload.split('\n'):
-              if line.startswith('dpid:'):
-                try:
-                  return int(line[5:], 16)
-                except:
-                  pass
-            if len(t.payload) == 8:
-              # Maybe it's a FlowVisor LLDP...
-              # Do these still exist?
+    def lookInSysDesc ():
+      r = None
+      for t in lldph.tlvs[3:]:
+        if t.tlv_type == pkt.lldp.SYSTEM_DESC_TLV:
+          # This is our favored way...
+          for line in t.payload.split('\n'):
+            if line.startswith('dpid:'):
               try:
-                return struct.unpack("!Q", t.payload)[0]
+                return int(line[5:], 16)
               except:
                 pass
-            return None
-
-      originatorDPID = lookInSysDesc()
-
-      if originatorDPID == None:
-        # We'll look in the CHASSIS ID
-        if lldph.tlvs[0].subtype == pkt.chassis_id.SUB_LOCAL:
-          if lldph.tlvs[0].id.startswith('dpid:'):
-            # This is how NOX does it at the time of writing
+          if len(t.payload) == 8:
+            # Maybe it's a FlowVisor LLDP...
+            # Do these still exist?
             try:
-              originatorDPID = int(lldph.tlvs[0].id[5:], 16)
+              return struct.unpack("!Q", t.payload)[0]
             except:
               pass
-        if originatorDPID == None:
-          if lldph.tlvs[0].subtype == pkt.chassis_id.SUB_MAC:
-            # Last ditch effort -- we'll hope the DPID was small enough
-            # to fit into an ethernet address
-            if len(lldph.tlvs[0].id) == 6:
-              try:
-                s = lldph.tlvs[0].id
-                originatorDPID = struct.unpack("!Q",'\x00\x00' + s)[0]
-              except:
-                pass
+          return None
 
+    originatorDPID = lookInSysDesc()
+
+    if originatorDPID == None:
+      # We'll look in the CHASSIS ID
+      if lldph.tlvs[0].subtype == pkt.chassis_id.SUB_LOCAL:
+        if lldph.tlvs[0].id.startswith('dpid:'):
+          # This is how NOX does it at the time of writing
+          try:
+            originatorDPID = int(lldph.tlvs[0].id[5:], 16)
+          except:
+            pass
       if originatorDPID == None:
-        log.warning("Couldn't find a DPID in the LLDP packet")
-        return EventHalt
+        if lldph.tlvs[0].subtype == pkt.chassis_id.SUB_MAC:
+          # Last ditch effort -- we'll hope the DPID was small enough
+          # to fit into an ethernet address
+          if len(lldph.tlvs[0].id) == 6:
+            try:
+              s = lldph.tlvs[0].id
+              originatorDPID = struct.unpack("!Q",'\x00\x00' + s)[0]
+            except:
+              pass
 
-      if originatorDPID not in core.openflow.connections:
-        log.info('Received LLDP packet from unknown switch')
-        return EventHalt
+    if originatorDPID == None:
+      log.warning("Couldn't find a DPID in the LLDP packet")
+      return EventHalt
 
-      # Get port number from port TLV
-      if lldph.tlvs[1].subtype != pkt.port_id.SUB_PORT:
-        log.warning("Thought we found a DPID, but packet didn't have a port")
-        return EventHalt
-      originatorPort = None
-      if lldph.tlvs[1].id.isdigit():
-        # We expect it to be a decimal value
-        originatorPort = int(lldph.tlvs[1].id)
-      elif len(lldph.tlvs[1].id) == 2:
-        # Maybe it's a 16 bit port number...
-        try:
-          originatorPort  =  struct.unpack("!H", lldph.tlvs[1].id)[0]
-        except:
-          pass
-      if originatorPort is None:
-        log.warning("Thought we found a DPID, but port number didn't " +
-                    "make sense")
-        return EventHalt
+    if originatorDPID not in core.openflow.connections:
+      log.info('Received LLDP packet from unknown switch')
+      return EventHalt
 
-      if (event.dpid, event.port) == (originatorDPID, originatorPort):
-        log.warning("Port received its own LLDP packet; ignoring")
-        return EventHalt
+    # Get port number from port TLV
+    if lldph.tlvs[1].subtype != pkt.port_id.SUB_PORT:
+      log.warning("Thought we found a DPID, but packet didn't have a port")
+      return EventHalt
+    originatorPort = None
+    if lldph.tlvs[1].id.isdigit():
+      # We expect it to be a decimal value
+      originatorPort = int(lldph.tlvs[1].id)
+    elif len(lldph.tlvs[1].id) == 2:
+      # Maybe it's a 16 bit port number...
+      try:
+        originatorPort  =  struct.unpack("!H", lldph.tlvs[1].id)[0]
+      except:
+        pass
+    if originatorPort is None:
+      log.warning("Thought we found a DPID, but port number didn't " +
+                  "make sense")
+      return EventHalt
 
-      link = Discovery.Link(originatorDPID, originatorPort, event.dpid, event.port,link_type)
-      if link not in self.adjacency:
+    if (event.dpid, event.port) == (originatorDPID, originatorPort):
+      log.warning("Port received its own LLDP packet; ignoring")
+      return EventHalt
+
+    link = Discovery.Link(originatorDPID, originatorPort, event.dpid, event.port,link_type)
+    if link not in self.adjacency:
+      self.adjacency[link] = time.time()
+      self.link_attribute[link] = link
+      log.info('link detected: %s and the type is %s', link, link.link_type)
+      self.raiseEventNoErrors(LinkEvent, True, link, event)
+    else:
+      if link.link_type is self.link_attribute[link].link_type:
         self.adjacency[link] = time.time()
+      elif link.link_type is 'broadcast' and self.link_attribute[link].link_type is 'lldp':
+        pass
+      elif link.link_type is 'lldp' and self.link_attribute[link].link_type is 'broadcast':
         self.link_attribute[link] = link
-        log.info('link detected: %s and the type is %s', link, link.link_type)
-        self.raiseEventNoErrors(LinkEvent, True, link, event)
-      else:
-        if link.link_type is self.link_attribute[link].link_type:
-          self.adjacency[link] = time.time()
-        elif link.link_type is 'broadcast' and self.link_attribute[link].link_type is 'lldp':
-          pass
-        elif link.link_type is 'lldp' and self.link_attribute[link].link_type is 'broadcast':
-          self.link_attribute[link] = link
-          self.raiseEventNoErrors(LinkEvent,False,link)
-          del self.adjacency[link]
-          self.adjacency[link] = time.time()
-          self.raiseEventNoErrors(LinkEvent,True,link,event)
-        # Just update timestamp
-
-      return EventHalt # Probably nobody else needs this event
+        self.raiseEventNoErrors(LinkEvent,False,link)
+        del self.adjacency[link]
+        self.adjacency[link] = time.time()
+        self.raiseEventNoErrors(LinkEvent,True,link,event)
+        print self.adjacency
+      # Just update timestamp
+    print self.adjacency
+    return EventHalt # Probably nobody else needs this event
 
   def _delete_links (self, links):
     for link in links:
