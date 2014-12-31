@@ -512,7 +512,6 @@ class Discovery (EventMixin):
         self.raiseEventNoErrors(LinkEvent,True,link,event)
         print self.adjacency
       # Just update timestamp
-    print self.adjacency
     return EventHalt # Probably nobody else needs this event
 
   def _delete_links (self, links):

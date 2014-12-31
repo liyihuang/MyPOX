@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at:
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -38,27 +38,29 @@ from pox.openflow.discovery import Discovery
 from pox.lib.util import dpidToStr
 from pox.lib.recoco import Timer
 import time
+import networkx as nx
 
 log = core.getLogger()
 
 # Might be nice if we made this accessible on core...
-#_adj = defaultdict(lambda:defaultdict(lambda:[]))
+# _adj = defaultdict(lambda:defaultdict(lambda:[]))
 
-def _calc_spanning_tree ():
+def _calc_spanning_tree():
   """
-  Calculates the actual spanning tree
+Calculates the actual spanning tree
 
-  Returns it as dictionary where the keys are DPID1, and the
-  values are tuples of (DPID2, port-num), where port-num
-  is the port on DPID1 connecting to DPID2.
-  """
-  def flip (link):
+Returns it as dictionary where the keys are DPID1, and the
+values are tuples of (DPID2, port-num), where port-num
+is the port on DPID1 connecting to DPID2.
+"""
+
+  def flip(link):
     return Discovery.Link(link[2], link[3], link[0], link[1], link[4])
 
-  adj = defaultdict(lambda:defaultdict(lambda:[]))
+  adj = defaultdict(lambda: defaultdict(lambda: []))
   switches = set()
   # Add all links and switches
-  for l in core.openflow_discovery.adjacency:
+  for l in _generator_for_link('lldp'):
     adj[l.dpid1][l.dpid2].append(l)
     switches.add(l.dpid1)
     switches.add(l.dpid2)
@@ -84,14 +86,11 @@ def _calc_spanning_tree ():
         if s1 in adj[s2]:
           # Delete the other way too
           del adj[s2][s1]
-
   q = []
   more = set(switches)
 
   done = set()
-
   tree = defaultdict(set)
-
   while True:
     q = sorted(list(more)) + q
     more.clear()
@@ -99,21 +98,19 @@ def _calc_spanning_tree ():
     v = q.pop(False)
     if v in done: continue
     done.add(v)
-    for w,p in adj[v].iteritems():
+    for w, p in adj[v].iteritems():
       if w in tree: continue
       more.add(w)
-      tree[v].add((w,p))
-      tree[w].add((v,adj[w][v]))
-
+      tree[v].add((w, p))
+      tree[w].add((v, adj[w][v]))
   if False:
     log.debug("*** SPANNING TREE ***")
-    for sw,ports in tree.iteritems():
+    for sw, ports in tree.iteritems():
       #print " ", dpidToStr(sw), ":", sorted(list(ports))
       #print " ", sw, ":", [l[0] for l in sorted(list(ports))]
       log.debug((" %i : " % sw) + " ".join([str(l[0]) for l in
-                                           sorted(list(ports))]))
+                                            sorted(list(ports))]))
     log.debug("*********************")
-
   return tree
 
 
@@ -121,7 +118,7 @@ def _calc_spanning_tree ():
 # If other things mess with port states, these may not be correct.  We
 # could also refer to Connection.ports, but those are not guaranteed to
 # be up to date.
-_prev = defaultdict(lambda : defaultdict(lambda : None))
+_prev = defaultdict(lambda: defaultdict(lambda: None))
 
 # If True, we set ports down when a switch connects
 _noflood_by_default = False
@@ -131,7 +128,7 @@ _noflood_by_default = False
 _hold_down = False
 
 
-def _handle_ConnectionUp (event):
+def _handle_ConnectionUp(event):
   # When a switch connects, forget about previous port states
   _prev[event.dpid].clear()
 
@@ -142,36 +139,36 @@ def _handle_ConnectionUp (event):
       if p.port_no >= of.OFPP_MAX: continue
       _prev[con.dpid][p.port_no] = False
       pm = of.ofp_port_mod(port_no=p.port_no,
-                          hw_addr=p.hw_addr,
-                          config = of.OFPPC_NO_FLOOD,
-                          mask = of.OFPPC_NO_FLOOD)
+                           hw_addr=p.hw_addr,
+                           config=of.OFPPC_NO_FLOOD,
+                           mask=of.OFPPC_NO_FLOOD)
       con.send(pm)
     _invalidate_ports(con.dpid)
 
   if _hold_down:
     t = Timer(core.openflow_discovery.send_cycle_time + 1, _update_tree,
-              kw={'force_dpid':event.dpid})
+              kw={'force_dpid': event.dpid})
 
 
-def _handle_LinkEvent (event):
+def _handle_LinkEvent(event):
   # When links change, update spanning tree
-  (dp1,p1),(dp2,p2) = event.link.end
+  (dp1, p1), (dp2, p2) = event.link.end
   if _prev[dp1][p1] is False:
     if _prev[dp2][p2] is False:
       # We're disabling this link; who cares if it's up or down?
-      #log.debug("Ignoring link status for %s", event.link)
+      # log.debug("Ignoring link status for %s", event.link)
       return
-
   _update_tree()
+  _analyse_broadcast_link()
 
 
-def _update_tree (force_dpid = None):
+def _update_tree(force_dpid=None):
   """
-  Update spanning tree
+Update spanning tree
 
-  force_dpid specifies a switch we want to update even if we are supposed
-  to be holding down changes.
-  """
+force_dpid specifies a switch we want to update even if we are supposed
+to be holding down changes.
+"""
 
   # Get a spanning tree
   tree = _calc_spanning_tree()
@@ -187,8 +184,8 @@ def _update_tree (force_dpid = None):
     change_count = 0
     for sw, ports in tree.iteritems():
       con = core.openflow.getConnection(sw)
-      if con is None: continue # Must have disconnected
-      if con.connect_time is None: continue # Not fully connected
+      if con is None: continue  # Must have disconnected
+      if con.connect_time is None: continue  # Not fully connected
 
       if _hold_down:
         if con.connect_time > enable_time:
@@ -208,7 +205,7 @@ def _update_tree (force_dpid = None):
               flood = True
           if _prev[sw][p.port_no] is flood:
             #print sw,p.port_no,"skip","(",flood,")"
-            continue # Skip
+            continue  # Skip
           change_count += 1
           _prev[sw][p.port_no] = flood
           #print sw,p.port_no,flood
@@ -216,8 +213,8 @@ def _update_tree (force_dpid = None):
 
           pm = of.ofp_port_mod(port_no=p.port_no,
                                hw_addr=p.hw_addr,
-                               config = 0 if flood else of.OFPPC_NO_FLOOD,
-                               mask = of.OFPPC_NO_FLOOD)
+                               config=0 if flood else of.OFPPC_NO_FLOOD,
+                               mask=of.OFPPC_NO_FLOOD)
           con.send(pm)
 
           _invalidate_ports(con.dpid)
@@ -228,34 +225,87 @@ def _update_tree (force_dpid = None):
     log.exception("Couldn't push spanning tree")
 
 
-_dirty_switches = {} # A map dpid_with_dirty_ports->Timer
-_coalesce_period = 2 # Seconds to wait between features requests
+def _check_path(dpid1, dpid2):
+  g = nx.Graph()
+  for link in _generator_for_link('lldp'):
+    g.add_edge(link.dpid1, link.dpid2)
 
-def _invalidate_ports (dpid):
+  return nx.has_path(g, dpid1, dpid2) if all(i in g.nodes() for i in [dpid1,dpid2]) else log.info('not all nodes in g')
+
+
+def _generator_for_link(link_type):
+  return (l for l in core.openflow_discovery.adjacency if l.link_type is link_type)
+
+_dirty_switches = {}  # A map dpid_with_dirty_ports->Timer
+_coalesce_period = 2  # Seconds to wait between features requests
+
+
+def _analyse_broadcast_link():
+  switches = set()
+  clouds = set()
+  for link in _generator_for_link('broadcast'):
+    if Switch(link.dpid1, link.port1) not in switches and Switch(link.dpid2, link.port2) not in switches:
+      sw1 = Switch(link.dpid1, link.port1)
+      sw2 = Switch(link.dpid2, link.port2)
+
+      cloud = Cloud(sw1,sw2)
+      clouds.add(cloud)
+
+      sw1.cloud = cloud
+      sw2.cloud = cloud
+
+
+      switches.add(sw1)
+      switches.add(sw2)
+    elif Switch(link.dpid1, link.port1) in switches and Switch(link.dpid2, link.port2) in switches:
+      pass
+    elif Switch(link.dpid1,link.port1) in switches and Switch(link.dpid2,link.port2) not in switches:
+      for sw in switches:
+        if sw == Switch(link.dpid1,link.port1):
+          cloud = sw.cloud
+      new_switch = Switch(link.dpid2, link.port2,cloud)
+      cloud.addswitch(new_switch)
+      switches.add(new_switch)
+    elif Switch(link.dpid1,link.port1) not in switches and Switch(link.dpid2,link.port2) in switches:
+      for sw in switches:
+        if sw == Switch(link.dpid2,link.port2):
+          cloud = sw.cloud
+      new_switch = Switch(link.dpid1, link.port1,cloud)
+      cloud.addswitch(new_switch)
+      switches.add(new_switch)
+  return clouds,switches
+
+
+
+
+
+
+def _invalidate_ports(dpid):
   """
-  Registers the fact that port info for dpid may be out of date
+Registers the fact that port info for dpid may be out of date
 
-  When the spanning tree adjusts the port flags, the port config bits
-  we keep in the Connection become out of date.  We don't want to just
-  set them locally because an in-flight port status message could
-  overwrite them.  We also might not want to assume they get set the
-  way we want them.  SO, we do send a features request, but we wait a
-  moment before sending it so that we can potentially coalesce several.
+When the spanning tree adjusts the port flags, the port config bits
+we keep in the Connection become out of date.  We don't want to just
+set them locally because an in-flight port status message could
+overwrite them.  We also might not want to assume they get set the
+way we want them.  SO, we do send a features request, but we wait a
+moment before sending it so that we can potentially coalesce several.
 
-  TLDR: Port information for this switch may be out of date for around
-        _coalesce_period seconds.
-  """
+TLDR: Port information for this switch may be out of date for around
+      _coalesce_period seconds.
+"""
   if dpid in _dirty_switches:
     # We're already planning to check
     return
   t = Timer(_coalesce_period, _check_ports, args=(dpid,))
   _dirty_switches[dpid] = t
 
-def _check_ports (dpid):
+
+def _check_ports(dpid):
   """
-  Sends a features request to the given dpid
-  """
-  _dirty_switches.pop(dpid,None)
+Sends a features request to the given dpid
+"""
+  _dirty_switches.pop(dpid, None)
   con = core.openflow.getConnection(dpid)
   if con is None: return
   con.send(of.ofp_barrier_request())
@@ -263,15 +313,57 @@ def _check_ports (dpid):
   log.debug("Requested switch features for %s", str(con))
 
 
-def launch (no_flood = False, hold_down = False):
+class Switch(object):
+  """docstring for switch"""
+  def __init__(self, dpid=0, port_number=0, cloud=None, side=None, active=False):
+    super(Switch, self).__init__()
+    self.dpid = dpid
+    self.port_number = port_number
+    self.cloud = cloud
+    self.side = side
+    self.active = active
+
+  def __str__(self):
+    return 'dpid is %s, port_number is %s'%(self.dpid, self.port_number)
+
+  def __hash__(self):
+    return self.dpid + self.port_number
+
+  def __eq__(self, other):
+    return self.dpid == other.dpid and self.port_number == other.port_number
+
+
+class Cloud(object):
+
+  def __init__(self, *args):
+    super(Cloud, self).__init__()
+    self.switches = set()
+    self.addswitch(*args)
+
+  def __str__(self):
+    return
+
+  def addswitch(self, *args):
+    for i in args:
+      self.switches.add(i)
+
+  def removeswitch(self,*args):
+    for i in args:
+      self.switches.remove(i)
+
+
+
+
+def launch(no_flood=False, hold_down=False):
   global _noflood_by_default, _hold_down
   if no_flood is True:
     _noflood_by_default = True
   if hold_down is True:
     _hold_down = True
 
-  def start_spanning_tree ():
+  def start_spanning_tree():
     core.openflow.addListenerByName("ConnectionUp", _handle_ConnectionUp)
     core.openflow_discovery.addListenerByName("LinkEvent", _handle_LinkEvent)
     log.debug("Spanning tree component ready")
+
   core.call_when_ready(start_spanning_tree, "openflow_discovery")
