@@ -39,6 +39,7 @@ from pox.lib.util import dpidToStr
 from pox.lib.recoco import Timer
 import time
 import networkx as nx
+import itertools
 
 log = core.getLogger()
 
@@ -106,7 +107,7 @@ is the port on DPID1 connecting to DPID2.
   if False:
     log.debug("*** SPANNING TREE ***")
     for sw, ports in tree.iteritems():
-      #print " ", dpidToStr(sw), ":", sorted(list(ports))
+      # print " ", dpidToStr(sw), ":", sorted(list(ports))
       #print " ", sw, ":", [l[0] for l in sorted(list(ports))]
       log.debug((" %i : " % sw) + " ".join([str(l[0]) for l in
                                             sorted(list(ports))]))
@@ -159,7 +160,7 @@ def _handle_LinkEvent(event):
       # log.debug("Ignoring link status for %s", event.link)
       return
   _update_tree()
-  _analyse_broadcast_link()
+  _set_switches_clouds_sites()
 
 
 def _update_tree(force_dpid=None):
@@ -204,11 +205,11 @@ to be holding down changes.
             if core.openflow_discovery.is_edge_port(sw, p.port_no):
               flood = True
           if _prev[sw][p.port_no] is flood:
-            #print sw,p.port_no,"skip","(",flood,")"
+            # print sw,p.port_no,"skip","(",flood,")"
             continue  # Skip
           change_count += 1
           _prev[sw][p.port_no] = flood
-          #print sw,p.port_no,flood
+          # print sw,p.port_no,flood
           #TODO: Check results
 
           pm = of.ofp_port_mod(port_no=p.port_no,
@@ -229,53 +230,55 @@ def _check_path(dpid1, dpid2):
   g = nx.Graph()
   for link in _generator_for_link('lldp'):
     g.add_edge(link.dpid1, link.dpid2)
+  if dpid1 == dpid2:
+    return True
+  return nx.has_path(g, dpid1, dpid2) if all(i in g.nodes() for i in [dpid1, dpid2]) else log.info(
+    'not all nodes in g')
 
-  return nx.has_path(g, dpid1, dpid2) if all(i in g.nodes() for i in [dpid1,dpid2]) else log.info('not all nodes in g')
+
+def _set_switches_clouds_sites():
+
+  clouds_set = set()
+  switches_set = set()
+  sites_set = set()
+
+  cloud_g = nx.Graph()
+
+  for link in _generator_for_link('broadcast'):
+    cloud_g.add_edge(Switch(link.dpid1,link.port1),Switch(link.dpid2,link.port2))
+
+  for clique in nx.find_cliques(cloud_g):
+    cloud = Cloud()
+    clouds_set.add(cloud)
+    for sw in clique:
+      sw.cloud = cloud
+      cloud.switches.add(sw)
+      switches_set.add(sw)
+
+  for cloud in clouds_set:
+    site_g = nx.Graph()
+    for i in itertools.combinations_with_replacement(cloud.switches, 2):
+      if _check_path(i[0].dpid,i[1].dpid):
+        site_g.add_edge(i[0],i[1])
+
+    for sw_in_site in nx.connected_components(site_g):
+      site = Site()
+      sites_set.add(site)
+      site.cloud = cloud
+      cloud.sites.add(site)
+
+      for sw in sw_in_site:
+        sw.site = site
+        site.switches.add(sw)
+  return clouds_set,sites_set,switches_set
 
 
 def _generator_for_link(link_type):
   return (l for l in core.openflow_discovery.adjacency if l.link_type is link_type)
 
+
 _dirty_switches = {}  # A map dpid_with_dirty_ports->Timer
 _coalesce_period = 2  # Seconds to wait between features requests
-
-
-def _analyse_broadcast_link():
-  switches = set()
-  clouds = set()
-  for link in _generator_for_link('broadcast'):
-    if Switch(link.dpid1, link.port1) not in switches and Switch(link.dpid2, link.port2) not in switches:
-      sw1 = Switch(link.dpid1, link.port1)
-      sw2 = Switch(link.dpid2, link.port2)
-
-      cloud = Cloud(sw1,sw2)
-      clouds.add(cloud)
-
-      sw1.cloud = cloud
-      sw2.cloud = cloud
-
-
-      switches.add(sw1)
-      switches.add(sw2)
-    elif Switch(link.dpid1, link.port1) in switches and Switch(link.dpid2, link.port2) in switches:
-      pass
-    elif Switch(link.dpid1,link.port1) in switches and Switch(link.dpid2,link.port2) not in switches:
-      for sw in switches:
-        if sw == Switch(link.dpid1,link.port1):
-          cloud = sw.cloud
-      new_switch = Switch(link.dpid2, link.port2,cloud)
-      cloud.addswitch(new_switch)
-      switches.add(new_switch)
-    elif Switch(link.dpid1,link.port1) not in switches and Switch(link.dpid2,link.port2) in switches:
-      for sw in switches:
-        if sw == Switch(link.dpid2,link.port2):
-          cloud = sw.cloud
-      new_switch = Switch(link.dpid1, link.port1,cloud)
-      cloud.addswitch(new_switch)
-      switches.add(new_switch)
-  return clouds,switches
-
-
 
 
 
@@ -292,7 +295,7 @@ way we want them.  SO, we do send a features request, but we wait a
 moment before sending it so that we can potentially coalesce several.
 
 TLDR: Port information for this switch may be out of date for around
-      _coalesce_period seconds.
+    _coalesce_period seconds.
 """
   if dpid in _dirty_switches:
     # We're already planning to check
@@ -315,16 +318,17 @@ Sends a features request to the given dpid
 
 class Switch(object):
   """docstring for switch"""
-  def __init__(self, dpid=0, port_number=0, cloud=None, side=None, active=False):
+
+  def __init__(self, dpid=0, port_number=0, cloud=None, site=None, active=False):
     super(Switch, self).__init__()
     self.dpid = dpid
     self.port_number = port_number
     self.cloud = cloud
-    self.side = side
+    self.site = site
     self.active = active
 
   def __str__(self):
-    return 'dpid is %s, port_number is %s'%(self.dpid, self.port_number)
+    return 'dpid is %s, port_number is %s, the cloud is %s, the site is %s' % (self.dpid, self.port_number, self.cloud,self.site)
 
   def __hash__(self):
     return self.dpid + self.port_number
@@ -334,23 +338,18 @@ class Switch(object):
 
 
 class Cloud(object):
-
-  def __init__(self, *args):
+  def __init__(self,):
     super(Cloud, self).__init__()
     self.switches = set()
-    self.addswitch(*args)
+    self.sites = set()
 
-  def __str__(self):
-    return
 
-  def addswitch(self, *args):
-    for i in args:
-      self.switches.add(i)
 
-  def removeswitch(self,*args):
-    for i in args:
-      self.switches.remove(i)
-
+class Site(object):
+  def __init__(self, ):
+    super(Site, self).__init__()
+    self.switches = set()
+    self.cloud = set()
 
 
 
