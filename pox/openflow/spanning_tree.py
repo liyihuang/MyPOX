@@ -262,6 +262,9 @@ def _set_switches_clouds_sites():
         site_g.add_edge(i[0],i[1])
 
     for sw_in_site in nx.connected_components(site_g):
+      sw_in_site.sort(key = lambda switch:switch.dpid)
+      sw_in_site[0].active = True
+
       site = Site()
       sites_set.add(site)
       site.cloud = cloud
@@ -269,7 +272,8 @@ def _set_switches_clouds_sites():
 
       for sw in sw_in_site:
         sw.site = site
-        site.switches.add(sw)
+        site.switches.append(sw)
+
   return clouds_set,sites_set,switches_set
 
 
@@ -348,8 +352,8 @@ class Cloud(object):
 class Site(object):
   def __init__(self, ):
     super(Site, self).__init__()
-    self.switches = set()
-    self.cloud = set()
+    self.switches = []
+    self.cloud = None
 
 
 
