@@ -437,10 +437,10 @@ class l2_multi (EventMixin):
     # For link removals, this makes sure that we don't use a
     # path that may have been broken.
     #NOTE: This could be radically improved! (e.g., not *ALL* paths break)
-    clear = of.ofp_flow_mod(command=of.OFPFC_DELETE)
+    '''clear = of.ofp_flow_mod(command=of.OFPFC_DELETE)
     for sw in switches.itervalues():
       if sw.connection is None: continue
-      sw.connection.send(clear)
+      sw.connection.send(clear)'''
     path_map.clear()
 
     if event.removed:
