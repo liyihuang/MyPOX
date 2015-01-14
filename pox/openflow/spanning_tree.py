@@ -50,7 +50,6 @@ all_switches_set = set()
 # _adj = defaultdict(lambda:defaultdict(lambda:[]))
 
 def _calc_spanning_tree():
-
   """
 Calculates the actual spanning tree
 
@@ -60,12 +59,12 @@ is the port on DPID1 connecting to DPID2.
 """
 
   def flip(link):
-    return Discovery.Link(link[2], link[3], link[0], link[1], link[4])
+    return Discovery.Link(link.dpid2, link.port2, link.dpid1, link.port1, link.link_type,link.available)
 
   adj = defaultdict(lambda: defaultdict(lambda: []))
   switches = set()
   # Add all links and switches
-  for l in _generator_for_link('lldp'):
+  for l in generator_for_link('lldp'):
     adj[l.dpid1][l.dpid2].append(l)
     switches.add(l.dpid1)
     switches.add(l.dpid2)
@@ -156,15 +155,19 @@ def _handle_ConnectionUp(event):
 
 
 def _handle_LinkEvent(event):
-  # When links change, update spanning tree
-  (dp1, p1), (dp2, p2) = event.link.end
-  if _prev[dp1][p1] is False:
-    if _prev[dp2][p2] is False:
-      # We're disabling this link; who cares if it's up or down?
-      # log.debug("Ignoring link status for %s", event.link)
-      return
-  _update_tree()
-  update_sw_cloud_site_domain()
+  if event.link.link_type is 'lldp':
+
+    # When links change, update spanning tree
+    (dp1, p1), (dp2, p2) = event.link.end
+    if _prev[dp1][p1] is False:
+      if _prev[dp2][p2] is False:
+        # We're disabling this link; who cares if it's up or down?
+        # log.debug("Ignoring link status for %s", event.link)
+        return
+    _update_tree()
+
+  elif event.link.link_type is 'broadcast':
+    update_sw_cloud_site_domain()
 
 
 def _update_tree(force_dpid=None):
@@ -237,6 +240,7 @@ def _check_path(dpid1, dpid2):
     return nx.has_path(g, dpid1, dpid2) if all(i in g.nodes() for i in [dpid1, dpid2]) else log.info(
       'not all nodes in g')
 
+
 def _get_openflow_domain():
   g = _graph_for_link('lldp')
   domain_sw_dpid_set = set()
@@ -255,10 +259,11 @@ def _get_openflow_domain():
 
   return of_domain_set
 
+
 def _clear_flow_for_all_sw():
   all_switches_set.clear()
-  for link in _generator_for_link():
-    all_switches_set.update([link.dpid1,link.dpid2])
+  for link in generator_for_link():
+    all_switches_set.update([link.dpid1, link.dpid2])
   for sw in all_switches_set:
     clear = of.ofp_flow_mod(command=of.OFPFC_DELETE)
     con = core.openflow.getConnection(sw)
@@ -266,11 +271,16 @@ def _clear_flow_for_all_sw():
     con.send(clear)
 
 
-def update_sw_cloud_site_domain():
+def _clear_broadcast_link_availablity():
+  for link in generator_for_link('broadcast'):
+    link.available = True
 
-  clouds_set,sites_set,switches_set = _set_switches_clouds_sites()
+
+def update_sw_cloud_site_domain():
+  clouds_set, sites_set, switches_set = _set_switches_clouds_sites()
 
   _clear_flow_for_all_sw()
+  _clear_broadcast_link_availablity()
   _set_port_status_for_every_site(switches_set)
 
   of_domain_sets = _get_openflow_domain()
@@ -284,11 +294,15 @@ def update_sw_cloud_site_domain():
 
   sites_to_be_down = form_big_spanning_tree(clouds_set)
   if sites_to_be_down:
-    switches_to_be_down = map(lambda x:x.switches[0],sites_to_be_down)
+    switches_to_be_down = map(lambda x: x.switches[0], sites_to_be_down)
     _send_sw_flows_no_floods(switches_to_be_down)
 
-def form_big_spanning_tree(clouds):
+    for sw in switches_to_be_down:
+      _tag_broadcast_link(sw.dpid,sw.port_number)
 
+
+
+def form_big_spanning_tree(clouds):
   original_g = nx.Graph()
 
   if not clouds: return None
@@ -296,7 +310,7 @@ def form_big_spanning_tree(clouds):
     if not cloud.sites: return None
     for site in cloud.sites:
       if not site.switches: return None
-      original_g.add_edge(cloud,site.of_domain,site=site)
+      original_g.add_edge(cloud, site.of_domain,weight=site.switches[0].dpid, site=site)
 
   spt = nx.minimum_spanning_tree(original_g)
   spt_att = nx.get_edge_attributes(spt, 'site')
@@ -305,15 +319,13 @@ def form_big_spanning_tree(clouds):
   return set(original_g_att.itervalues()) - set(spt_att.itervalues())
 
 
-
-
 def _set_switches_clouds_sites():
   clouds_set = set()
   switches_set = set()
   sites_set = set()
   cloud_g = nx.Graph()
 
-  for link in _generator_for_link('broadcast'):
+  for link in generator_for_link('broadcast'):
     cloud_g.add_edge(Switch(link.dpid1, link.port1), Switch(link.dpid2, link.port2))
 
   for clique in nx.find_cliques(cloud_g):
@@ -343,7 +355,7 @@ def _set_switches_clouds_sites():
         sw.site = site
         site.add_switch(sw)
 
-  return clouds_set,sites_set,switches_set
+  return clouds_set, sites_set, switches_set
 
 
 def _send_sw_flows_no_floods(switches_set):
@@ -357,17 +369,13 @@ def _send_sw_flows_no_floods(switches_set):
       log.debug('Not fully connected')
       continue
 
-    send_lldp_broadcast_drop_flow(sw,con)
 
-    pm = of.ofp_port_mod(port_no=sw.port_number,hw_addr=dpid_port_to_mac(sw.dpid,sw.port_number,con),
-                         config=of.OFPPC_NO_FLOOD,mask=of.OFPPC_NO_FLOOD)
+    pm = of.ofp_port_mod(port_no=sw.port_number, hw_addr=dpid_port_to_mac(sw.dpid, sw.port_number, con),
+                         config=of.OFPPC_NO_FLOOD, mask=of.OFPPC_NO_FLOOD)
     con.send(pm)
 
 
-
-
 def _set_port_status_for_every_site(switches_set):
-
   for switch in switches_set:
     con = core.openflow.getConnection(switch.dpid)
 
@@ -378,13 +386,16 @@ def _set_port_status_for_every_site(switches_set):
       log.debug('Not fully connected')
       continue
     if switch.active is False:
-      send_lldp_broadcast_drop_flow(switch,con)
+      send_lldp_broadcast_drop_flow (switch, con)
+      _tag_broadcast_link(switch.dpid,switch.port_number)
 
-    pm = of.ofp_port_mod(port_no=switch.port_number,hw_addr=dpid_port_to_mac(switch.dpid,switch.port_number,con),
-                         config=0 if switch.active else of.OFPPC_NO_FLOOD,mask=of.OFPPC_NO_FLOOD)
+    pm = of.ofp_port_mod(port_no=switch.port_number, hw_addr=dpid_port_to_mac(switch.dpid, switch.port_number, con),
+                         config=0 if switch.active else of.OFPPC_NO_FLOOD, mask=of.OFPPC_NO_FLOOD)
     con.send(pm)
 
-def send_lldp_broadcast_drop_flow(switch,con):
+
+
+def send_lldp_broadcast_drop_flow(switch, con):
   match_rule = defaultdict()
   match_rule['lldp'] = of.ofp_match(in_port=switch.port_number, dl_dst=pkt.ETHERNET.LLDP_MULTICAST,
                                     dl_type=pkt.ethernet.LLDP_TYPE)
@@ -396,7 +407,7 @@ def send_lldp_broadcast_drop_flow(switch,con):
     add_flow_msg = of.ofp_flow_mod(match=match)
     if key is 'any':
       add_flow_msg.priority = of.OFP_DEFAULT_PRIORITY
-      add_flow_msg.actions.append(of.ofp_action_output(port=of.OFPP_NONE))
+      # add_flow_msg.actions.append(of.ofp_action_output(port=of.OFPP_NONE))
     else:
       add_flow_msg.priority = of.OFP_HIGH_PRIORITY
       add_flow_msg.actions.append(of.ofp_action_output(port=of.OFPP_CONTROLLER))
@@ -414,15 +425,24 @@ def dpid_port_to_mac(dpid, port_numer, con=None):
       return port.hw_addr
 
 
-def _generator_for_link(link_type=None):
+def generator_for_link(link_type=None):
   if link_type is None:
     return (l for l in core.openflow_discovery.adjacency)
+  elif link_type is not 'lldp' and link_type is not 'broadcast':
+    log.debug('type is not correct')
+    return None
   else:
     return (l for l in core.openflow_discovery.adjacency if l.link_type is link_type)
 
 
 _dirty_switches = {}  # A map dpid_with_dirty_ports->Timer
 _coalesce_period = 2  # Seconds to wait between features requests
+
+
+def _tag_broadcast_link(dpid,port_number):
+  for link in generator_for_link('broadcast'):
+    if ((dpid,port_number) == (link.dpid1,link.port1)) or ((dpid,port_number) == (link.dpid2, link.port2)):
+      link.available = False
 
 
 def _invalidate_ports(dpid):
@@ -485,19 +505,19 @@ class Switch(object):
 
 
 class Cloud(object):
-  def __init__(self ):
+  def __init__(self):
     super(Cloud, self).__init__()
     self.switches = set()
     self.sites = set()
 
   def __repr__(self):
-    return 'cloud '+ str([sw.dpid for sw in self.switches])
+    return 'cloud ' + str([sw.dpid for sw in self.switches])
 
   def __str__(self):
-    return 'cloud '+ str([sw.dpid for sw in self.switches])
+    return 'cloud ' + str([sw.dpid for sw in self.switches])
 
 
-class Site(object,):
+class Site(object, ):
   def __init__(self):
     super(Site, self).__init__()
     self.switches = []
@@ -505,7 +525,7 @@ class Site(object,):
     self.sw_dpid_set = set()
     self.of_domain = None
 
-  def add_switch(self,sw):
+  def add_switch(self, sw):
     self.switches.append(sw)
     self.sw_dpid_in_site()
 
@@ -515,15 +535,15 @@ class Site(object,):
     return self.sw_dpid_set
 
   def __repr__(self):
-    return 'site '+ str([sw.dpid for sw in self.switches])
+    return 'site ' + str([sw.dpid for sw in self.switches])
 
   def __str__(self):
-    return 'site '+ str([sw.dpid for sw in self.switches])
+    return 'site ' + str([sw.dpid for sw in self.switches])
 
 
 class Of_domain(object):
   def __init__(self, dpid_set=None):
-    super(Of_domain,self).__init__()
+    super(Of_domain, self).__init__()
     self.sw_dpid_set = dpid_set
     self.sites = set()
 
@@ -536,7 +556,7 @@ class Of_domain(object):
 
 def _graph_for_link(link_type):
   g = nx.Graph()
-  for link in _generator_for_link(link_type):
+  for link in generator_for_link(link_type):
     g.add_edge(link.dpid1, link.dpid2)
 
   return g
@@ -551,7 +571,7 @@ def launch(no_flood=False, hold_down=False):
 
   def start_spanning_tree():
     core.openflow.addListenerByName("ConnectionUp", _handle_ConnectionUp)
-    core.openflow_discovery.addListenerByName("LinkEvent", _handle_LinkEvent)
+    core.openflow_discovery.addListenerByName("LinkEvent", _handle_LinkEvent,priority=100)
     log.debug("Spanning tree component ready")
 
   core.call_when_ready(start_spanning_tree, "openflow_discovery")

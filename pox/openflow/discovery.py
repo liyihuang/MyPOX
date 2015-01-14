@@ -256,8 +256,16 @@ class LinkEvent (Event):
       return self.link.port2
     return None
 
+class LinkBase(object):
+  def __init__(self,dpid1,port1,dpid2,port2,link_type,available):
+    self.dpid1 = dpid1
+    self.port1 = port1
+    self.dpid2 = dpid2
+    self.port2 = port2
+    self.link_type = link_type
+    self.available = available
 
-class Link (namedtuple("LinkBase",("dpid1","port1","dpid2","port2","link_type"))):
+class Link (LinkBase):
 
   @property
   def uni (self):
@@ -272,15 +280,15 @@ class Link (namedtuple("LinkBase",("dpid1","port1","dpid2","port2","link_type"))
 
   @property
   def end (self):
-    return ((self[0],self[1]),(self[2],self[3]))
+    return ((self.dpid1,self.port1),(self.dpid2,self.port2))
 
   def __str__ (self):
-    return "%s.%s -> %s.%s and link_type is %s" % (self[0],self[1],
-                               self[2],self[3],self[4])
+    return "%s.%s -> %s.%s and link_type is %s, available is %s" %(self.dpid1,
+        self.port1, self.dpid2, self.port2,self.link_type,self.available)
 
   def __repr__ (self):
-    return "Link(dpid1=%s,port1=%s, dpid2=%s,port2=%s,type=%s)" % (self.dpid1,
-        self.port1, self.dpid2, self.port2,self.link_type)
+    return "Link(dpid1=%s,port1=%s, dpid2=%s,port2=%s,type=%s,available=%s)" % (self.dpid1,
+        self.port1, self.dpid2, self.port2,self.link_type,self.available)
 
   def __eq__(self, other):
     return other.dpid1 == self.dpid1 and other.dpid2 == self.dpid2 and \
@@ -288,7 +296,6 @@ class Link (namedtuple("LinkBase",("dpid1","port1","dpid2","port2","link_type"))
 
   def __hash__(self):
     return self.dpid1 + self.dpid2 + self.port1 + self.port2
-
 
 class Discovery (EventMixin):
   """
@@ -494,7 +501,7 @@ class Discovery (EventMixin):
       log.warning("Port received its own LLDP packet; ignoring")
       return EventHalt
 
-    link = Discovery.Link(originatorDPID, originatorPort, event.dpid, event.port,link_type)
+    link = Discovery.Link(originatorDPID, originatorPort, event.dpid, event.port,link_type, available=True)
     if link not in self.adjacency:
       self.adjacency[link] = time.time()
       self.link_attribute[link] = link

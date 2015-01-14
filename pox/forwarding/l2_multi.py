@@ -35,6 +35,8 @@ from collections import defaultdict
 from pox.openflow.discovery import Discovery
 from pox.lib.util import dpid_to_str
 import time
+from pox.openflow.spanning_tree import generator_for_link
+import networkx as nx
 
 log = core.getLogger()
 
@@ -43,6 +45,8 @@ adjacency = defaultdict(lambda:defaultdict(lambda:None))
 
 # Switches we know of.  [dpid] -> Switch
 switches = {}
+
+clouds = {}
 
 # ethaddr -> (switch, port)
 mac_map = {}
@@ -63,6 +67,7 @@ FLOW_HARD_TIMEOUT = 30
 # How long is allowable to set up a path?
 PATH_SETUP_TIME = 4
 
+broadcast_adj = set()
 
 def _calc_paths ():
   """
@@ -235,7 +240,8 @@ class Switch (EventMixin):
     self._connected_at = None
 
   def __repr__ (self):
-    return dpid_to_str(self.dpid)
+    return str(self.dpid)
+    # return dpid_to_str(self.dpid)
 
   def _install (self, switch, in_port, out_port, match, buf = None):
     msg = of.ofp_flow_mod()
@@ -425,11 +431,9 @@ class l2_multi (EventMixin):
 
   def _handle_openflow_discovery_LinkEvent (self, event):
     def flip (link):
-      return Discovery.Link(link[2],link[3], link[0],link[1],link[4])
+      return Discovery.Link(link.dpid2, link.port2, link.dpid1, link.port1, link.link_type,link.available)
 
-    l = event.link
-    sw1 = switches[l.dpid1]
-    sw2 = switches[l.dpid2]
+
 
     # Invalidate all flows and path info.
     # For link adds, this makes sure that if a new link leads to an
@@ -442,42 +446,50 @@ class l2_multi (EventMixin):
       if sw.connection is None: continue
       sw.connection.send(clear)'''
     path_map.clear()
+    if event.link.link_type is 'lldp':
+      l = event.link
+      sw1 = switches[l.dpid1]
+      sw2 = switches[l.dpid2]
 
-    if event.removed:
-      # This link no longer okay
-      if sw2 in adjacency[sw1]: del adjacency[sw1][sw2]
-      if sw1 in adjacency[sw2]: del adjacency[sw2][sw1]
+      if event.removed:
+        # This link no longer okay
+        if sw2 in adjacency[sw1]: del adjacency[sw1][sw2]
+        if sw1 in adjacency[sw2]: del adjacency[sw2][sw1]
 
-      # But maybe there's another way to connect these...
-      for ll in core.openflow_discovery.adjacency:
-        if ll.dpid1 == l.dpid1 and ll.dpid2 == l.dpid2:
-          if flip(ll) in core.openflow_discovery.adjacency:
-            # Yup, link goes both ways
-            adjacency[sw1][sw2] = ll.port1
-            adjacency[sw2][sw1] = ll.port2
-            # Fixed -- new link chosen to connect these
-            break
-    else:
-      # If we already consider these nodes connected, we can
-      # ignore this link up.
-      # Otherwise, we might be interested...
-      if adjacency[sw1][sw2] is None:
-        # These previously weren't connected.  If the link
-        # exists in both directions, we consider them connected now.
-        if flip(l) in core.openflow_discovery.adjacency:
-          # Yup, link goes both ways -- connected!
-          adjacency[sw1][sw2] = l.port1
-          adjacency[sw2][sw1] = l.port2
+        # But maybe there's another way to connect these...
+        for ll in core.openflow_discovery.adjacency:
+          if ll.dpid1 == l.dpid1 and ll.dpid2 == l.dpid2:
+            if flip(ll) in core.openflow_discovery.adjacency:
+              # Yup, link goes both ways
+              adjacency[sw1][sw2] = ll.port1
+              adjacency[sw2][sw1] = ll.port2
+              # Fixed -- new link chosen to connect these
+              break
+      else:
+        # If we already consider these nodes connected, we can
+        # ignore this link up.
+        # Otherwise, we might be interested...
+        if adjacency[sw1][sw2] is None:
+          # These previously weren't connected.  If the link
+          # exists in both directions, we consider them connected now.
+          if flip(l) in core.openflow_discovery.adjacency:
+            # Yup, link goes both ways -- connected!
+            adjacency[sw1][sw2] = l.port1
+            adjacency[sw2][sw1] = l.port2
+    elif event.link.link_type is 'broadcast':
+      self.clear_the_previous()
+      self.update_clouds_in_broadcast()
 
-      # If we have learned a MAC on this port which we now know to
-      # be connected to a switch, unlearn it.
-      bad_macs = set()
-      for mac,(sw,port) in mac_map.iteritems():
-        if sw is sw1 and port == l.port1: bad_macs.add(mac)
-        if sw is sw2 and port == l.port2: bad_macs.add(mac)
-      for mac in bad_macs:
-        log.debug("Unlearned %s", mac)
-        del mac_map[mac]
+
+    # If we have learned a MAC on this port which we now know to
+    # be connected to a switch, unlearn it.
+    bad_macs = set()
+    for mac,(sw,port) in mac_map.iteritems():
+      if sw is sw1 and port == l.port1: bad_macs.add(mac)
+      if sw is sw2 and port == l.port2: bad_macs.add(mac)
+    for mac in bad_macs:
+      log.debug("Unlearned %s", mac)
+      del mac_map[mac]
 
   def _handle_openflow_ConnectionUp (self, event):
     sw = switches.get(event.dpid)
@@ -496,6 +508,52 @@ class l2_multi (EventMixin):
       return
     #log.debug("Notify waiting packet %s,%s", event.dpid, event.xid)
     wp.notify(event)
+
+  def clear_the_previous(self):
+
+    for sw_cloud in broadcast_adj:
+      del adjacency[sw_cloud[0]][sw_cloud[1]]
+      del adjacency[sw_cloud[1]][sw_cloud[0]]
+
+
+    for cloud in clouds:
+      del switches[cloud]
+    clouds.clear()
+    broadcast_adj.clear()
+
+
+
+  def update_clouds_in_broadcast(self):
+    g = nx.Graph()
+    for link in generator_for_link('broadcast'):
+      if link.available is True:
+        g.add_edge((link.dpid1,link.port1), (link.dpid2,link.port2))
+
+    for clique in nx.find_cliques(g):
+      cloud_id = tuple(clique)
+      cloud = Cloud(cloud_id)
+      clouds[cloud_id] = cloud
+      switches[cloud_id]= cloud
+      for sw in clique:
+        sw_dpid = switches[sw[0]]
+        sw_port = sw[1]
+        adjacency[cloud][sw_dpid] = 0
+        adjacency[sw_dpid][cloud] = sw_port
+        broadcast_adj.add((sw_dpid,cloud))
+
+
+class Cloud(Switch):
+
+  def __init__(self,id):
+    super(Cloud,self).__init__()
+    self.sw = set()
+    self.id = id
+
+  def __repr__(self):
+    return str(self.id)
+
+
+
 
 
 def launch ():
