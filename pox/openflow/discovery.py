@@ -518,7 +518,6 @@ class Discovery (EventMixin):
         del self.adjacency[link]
         self.adjacency[link] = time.time()
         self.raiseEventNoErrors(LinkEvent,True,link,event)
-        print self.adjacency
       # Just update timestamp
     return EventHalt # Probably nobody else needs this event
 

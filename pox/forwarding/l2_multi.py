@@ -165,6 +165,12 @@ def _get_path (src, dst, first_port, final_port):
 
   return r
 
+def _is_edge_port_in_topo(id,port):
+  if port in adjacency[id].values():
+    return False
+  else:
+    return True
+
 
 class WaitingPath (object):
   """
@@ -266,6 +272,7 @@ class Switch (EventMixin):
     Attempts to install a path between this switch and some destination
     """
     p = _get_path(self, dst_sw, event.port, last_port)
+    p = [node for node in p if type(node[0]) is Switch]
     if p is None:
       log.warning("Can't get from %s to %s", match.dl_src, match.dl_dst)
 
@@ -318,6 +325,9 @@ class Switch (EventMixin):
 
 
   def _handle_PacketIn (self, event):
+    print 'start'
+    for x,y in mac_map.iteritems():
+      print x,y
     def flood ():
       """ Floods the packet """
       if self.is_holding_down:
@@ -341,6 +351,12 @@ class Switch (EventMixin):
     packet = event.parsed
 
     loc = (self, event.port) # Place we saw this ethaddr
+    dpid_port = (loc[0].dpid, loc[1])
+
+    for cloud in clouds.values():
+        if dpid_port in cloud.ports:
+          loc = (cloud, 0)
+
     oldloc = mac_map.get(packet.src) # Place we last saw this ethaddr
 
     if packet.effective_ethertype == packet.LLDP_TYPE:
@@ -353,11 +369,11 @@ class Switch (EventMixin):
         log.debug("Learned %s at %s.%i", packet.src, loc[0], loc[1])
     elif oldloc != loc:
       # ethaddr seen at different place!
-      if core.openflow_discovery.is_edge_port(loc[0].dpid, loc[1]):
+      if _is_edge_port_in_topo(loc[0],loc[1]):
         # New place is another "plain" port (probably)
         log.debug("%s moved from %s.%i to %s.%i?", packet.src,
-                  dpid_to_str(oldloc[0].dpid), oldloc[1],
-                  dpid_to_str(   loc[0].dpid),    loc[1])
+                  str(oldloc[0].dpid), oldloc[1],
+                  str(loc[0].dpid), loc[1])
         if packet.src.is_multicast == False:
           mac_map[packet.src] = loc # Learn position for ethaddr
           log.debug("Learned %s at %s.%i", packet.src, loc[0], loc[1])
@@ -374,7 +390,7 @@ class Switch (EventMixin):
           # that something has gone wrong.
           log.warning("Packet from %s to known destination %s arrived "
                       "at %s.%i without flow", packet.src, packet.dst,
-                      dpid_to_str(self.dpid), event.port)
+                      str(self.dpid), event.port)
 
 
     if packet.dst.is_multicast:
@@ -434,6 +450,9 @@ class l2_multi (EventMixin):
       return Discovery.Link(link.dpid2, link.port2, link.dpid1, link.port1, link.link_type,link.available)
 
 
+    l = event.link
+    sw1 = switches[l.dpid1]
+    sw2 = switches[l.dpid2]
 
     # Invalidate all flows and path info.
     # For link adds, this makes sure that if a new link leads to an
@@ -446,10 +465,7 @@ class l2_multi (EventMixin):
       if sw.connection is None: continue
       sw.connection.send(clear)'''
     path_map.clear()
-    if event.link.link_type is 'lldp':
-      l = event.link
-      sw1 = switches[l.dpid1]
-      sw2 = switches[l.dpid2]
+    if l.link_type is 'lldp':
 
       if event.removed:
         # This link no longer okay
@@ -476,7 +492,7 @@ class l2_multi (EventMixin):
             # Yup, link goes both ways -- connected!
             adjacency[sw1][sw2] = l.port1
             adjacency[sw2][sw1] = l.port2
-    elif event.link.link_type is 'broadcast':
+    elif l.link_type is 'broadcast':
       self.clear_the_previous()
       self.update_clouds_in_broadcast()
 
@@ -532,6 +548,8 @@ class l2_multi (EventMixin):
     for clique in nx.find_cliques(g):
       cloud_id = tuple(clique)
       cloud = Cloud(cloud_id)
+      for node in clique:
+        cloud.ports.append(node)
       clouds[cloud_id] = cloud
       switches[cloud_id]= cloud
       for sw in clique:
@@ -547,10 +565,11 @@ class Cloud(Switch):
   def __init__(self,id):
     super(Cloud,self).__init__()
     self.sw = set()
-    self.id = id
+    self.dpid = id
+    self.ports = []
 
   def __repr__(self):
-    return str(self.id)
+    return str(self.dpid)
 
 
 

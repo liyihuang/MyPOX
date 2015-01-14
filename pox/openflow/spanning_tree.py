@@ -155,6 +155,7 @@ def _handle_ConnectionUp(event):
 
 
 def _handle_LinkEvent(event):
+  print event.link.link_type
   if event.link.link_type is 'lldp':
 
     # When links change, update spanning tree
@@ -296,6 +297,7 @@ def update_sw_cloud_site_domain():
   if sites_to_be_down:
     switches_to_be_down = map(lambda x: x.switches[0], sites_to_be_down)
     _send_sw_flows_no_floods(switches_to_be_down)
+    send_lldp_broadcast_drop_flow_for_switches(switches_to_be_down)
 
     for sw in switches_to_be_down:
       _tag_broadcast_link(sw.dpid,sw.port_number)
@@ -393,6 +395,11 @@ def _set_port_status_for_every_site(switches_set):
                          config=0 if switch.active else of.OFPPC_NO_FLOOD, mask=of.OFPPC_NO_FLOOD)
     con.send(pm)
 
+
+def send_lldp_broadcast_drop_flow_for_switches(switches):
+  for sw in switches:
+    con = core.openflow.getConnection(sw.dpid)
+    send_lldp_broadcast_drop_flow(sw,con)
 
 
 def send_lldp_broadcast_drop_flow(switch, con):
