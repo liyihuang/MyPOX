@@ -264,6 +264,7 @@ class Switch (EventMixin):
     for sw,in_port,out_port in p:
       self._install(sw, in_port, out_port, match)
       msg = of.ofp_barrier_request()
+      if sw.connection is None: pass
       sw.connection.send(msg)
       wp.add_xid(sw.dpid,msg.xid)
 
