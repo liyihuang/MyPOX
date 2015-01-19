@@ -46,6 +46,8 @@ log = core.getLogger()
 
 all_switches_set = set()
 
+node_to_be_down = {}
+
 # Might be nice if we made this accessible on core...
 # _adj = defaultdict(lambda:defaultdict(lambda:[]))
 
@@ -155,7 +157,6 @@ def _handle_ConnectionUp(event):
 
 
 def _handle_LinkEvent(event):
-  print event.link.link_type
   if event.link.link_type is 'lldp':
 
     # When links change, update spanning tree
@@ -210,7 +211,8 @@ to be holding down changes.
         if p.port_no < of.OFPP_MAX:
           flood = p.port_no in tree_ports
           if not flood:
-            if core.openflow_discovery.is_edge_port(sw, p.port_no):
+            if core.openflow_discovery.is_edge_port(sw, p.port_no) or \
+                    core.openflow_discovery._is_broadcast_port(sw,p.port_no):
               flood = True
           if _prev[sw][p.port_no] is flood:
             # print sw,p.port_no,"skip","(",flood,")"
@@ -296,11 +298,15 @@ def update_sw_cloud_site_domain():
   sites_to_be_down = form_big_spanning_tree(clouds_set)
   if sites_to_be_down:
     switches_to_be_down = map(lambda x: x.switches[0], sites_to_be_down)
+    global node_to_be_down
+    node_to_be_down.clear()
+    for x in switches_to_be_down:
+      node_to_be_down[x.cloud.get_active_switches_for_cloud()] = x.dpid,x.port_number
+
+     # map(lambda x: test[x.cloud.get_active_switches_for_cloud()] = (x.dpid,x.port_number),switches_to_be_down)
     _send_sw_flows_no_floods(switches_to_be_down)
     send_lldp_broadcast_drop_flow_for_switches(switches_to_be_down)
 
-    for sw in switches_to_be_down:
-      _tag_broadcast_link(sw.dpid,sw.port_number)
 
 
 
@@ -399,10 +405,12 @@ def _set_port_status_for_every_site(switches_set):
 def send_lldp_broadcast_drop_flow_for_switches(switches):
   for sw in switches:
     con = core.openflow.getConnection(sw.dpid)
+    if con is None or con.connect_time is None: pass
     send_lldp_broadcast_drop_flow(sw,con)
 
 
 def send_lldp_broadcast_drop_flow(switch, con):
+  if con is None or con.connect_time is None: return
   match_rule = defaultdict()
   match_rule['lldp'] = of.ofp_match(in_port=switch.port_number, dl_dst=pkt.ETHERNET.LLDP_MULTICAST,
                                     dl_type=pkt.ethernet.LLDP_TYPE)
@@ -522,6 +530,10 @@ class Cloud(object):
 
   def __str__(self):
     return 'cloud ' + str([sw.dpid for sw in self.switches])
+
+  def get_active_switches_for_cloud(self):
+    swithes = filter(lambda x: x.active is True,self.switches)
+    return frozenset(map(lambda x: (x.dpid,x.port_number),swithes))
 
 
 class Site(object, ):

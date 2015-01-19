@@ -37,7 +37,6 @@ from pox.lib.util import dpid_to_str
 import time
 from pox.openflow.spanning_tree import generator_for_link
 import networkx as nx
-
 log = core.getLogger()
 
 # Adjacency map.  [sw1][sw2] -> port from sw1 to sw2
@@ -257,6 +256,7 @@ class Switch (EventMixin):
     msg.hard_timeout = FLOW_HARD_TIMEOUT
     msg.actions.append(of.ofp_action_output(port = out_port))
     msg.buffer_id = buf
+    if switch.connection is None: return
     switch.connection.send(msg)
 
   def _install_path (self, p, match, packet_in=None):
@@ -272,7 +272,6 @@ class Switch (EventMixin):
     Attempts to install a path between this switch and some destination
     """
     p = _get_path(self, dst_sw, event.port, last_port)
-    p = [node for node in p if type(node[0]) is Switch]
     if p is None:
       log.warning("Can't get from %s to %s", match.dl_src, match.dl_dst)
 
@@ -316,6 +315,7 @@ class Switch (EventMixin):
         match.dl_src, match.dl_dst, match.dl_type, len(p))
 
     # We have a path -- install it
+    p = filter(lambda x:type(x[0]) is Switch,p)
     self._install_path(p, match, event.ofp)
 
     # Now reverse it and install it backwards
@@ -325,9 +325,6 @@ class Switch (EventMixin):
 
 
   def _handle_PacketIn (self, event):
-    print 'start'
-    for x,y in mac_map.iteritems():
-      print x,y
     def flood ():
       """ Floods the packet """
       if self.is_holding_down:
@@ -449,7 +446,6 @@ class l2_multi (EventMixin):
     def flip (link):
       return Discovery.Link(link.dpid2, link.port2, link.dpid1, link.port1, link.link_type,link.available)
 
-
     l = event.link
     sw1 = switches[l.dpid1]
     sw2 = switches[l.dpid2]
@@ -540,16 +536,18 @@ class l2_multi (EventMixin):
 
 
   def update_clouds_in_broadcast(self):
+    from pox.openflow.spanning_tree import node_to_be_down
     g = nx.Graph()
     for link in generator_for_link('broadcast'):
       if link.available is True:
         g.add_edge((link.dpid1,link.port1), (link.dpid2,link.port2))
 
     for clique in nx.find_cliques(g):
-      cloud_id = tuple(clique)
+      if frozenset(clique) in node_to_be_down.keys():
+        clique.remove(node_to_be_down[frozenset(clique)])
+      cloud_id = frozenset(clique)
       cloud = Cloud(cloud_id)
-      for node in clique:
-        cloud.ports.append(node)
+      cloud.ports.extend(clique)
       clouds[cloud_id] = cloud
       switches[cloud_id]= cloud
       for sw in clique:

@@ -518,7 +518,7 @@ class Discovery (EventMixin):
         del self.adjacency[link]
         self.adjacency[link] = time.time()
         self.raiseEventNoErrors(LinkEvent,True,link,event)
-      # Just update timestamp
+      # Just update timestam
     return EventHalt # Probably nobody else needs this event
 
   def _delete_links (self, links):
@@ -538,7 +538,14 @@ class Discovery (EventMixin):
         return False
     return True
 
+  def _is_broadcast_port (self,dpid,port):
 
+    for link in self.adjacency:
+      if link.dpid1 == dpid and link.port1 == port and link.link_type =='broadcast':
+        return True
+      if link.dpid2 == dpid and link.port2 == port and link.link_type == 'broadcast':
+        return True
+    return False
 def launch (no_flow = False, explicit_drop = True, link_timeout = None,
             eat_early_packets = False):
   explicit_drop = str_to_bool(explicit_drop)
