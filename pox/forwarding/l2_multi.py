@@ -37,6 +37,8 @@ from pox.lib.util import dpid_to_str
 import time
 from pox.openflow.spanning_tree import generator_for_link
 import networkx as nx
+import itertools
+
 log = core.getLogger()
 
 # Adjacency map.  [sw1][sw2] -> port from sw1 to sw2
@@ -51,7 +53,9 @@ clouds = {}
 mac_map = {}
 
 # [sw1][sw2] -> (distance, intermediate)
-path_map = defaultdict(lambda:defaultdict(lambda:(None,None)))
+path_map = defaultdict(lambda:defaultdict(lambda: {}))
+
+real__path_map = defaultdict(lambda:defaultdict(lambda:set()))
 
 # Waiting path.  (dpid,xid)->WaitingPath
 waiting_paths = {}
@@ -60,8 +64,8 @@ waiting_paths = {}
 FLOOD_HOLDDOWN = 5
 
 # Flow timeouts
-FLOW_IDLE_TIMEOUT = 10
-FLOW_HARD_TIMEOUT = 30
+FLOW_IDLE_TIMEOUT = 30
+FLOW_HARD_TIMEOUT = 100
 
 # How long is allowable to set up a path?
 PATH_SETUP_TIME = 4
@@ -82,26 +86,77 @@ def _calc_paths ():
         print a,
       print
 
+  def __get_path(source, dest):
+    if source is dest: return None
+
+    intermediate = path_map[source][dest]['intermediate']
+    distance = path_map[source][dest]['distance']
+    if distance == 1:
+      return frozenset([tuple()])
+
+    # print('intermediate %s' % str(path_map[source][dest]))
+
+    def sub_path(k):
+      if k == source or k == dest:
+        return frozenset()
+      else:
+        left = map(lambda route: route + (k,), __get_path(source, k))
+        right = __get_path(k, dest)
+        # print('left = %s' % left)
+        # print('right = %s' % right)
+        return reduce(lambda result_set, product: result_set.union([product[0] + product[1]]),
+                      itertools.product(left, right), frozenset())
+
+    result = reduce(frozenset.union, map(lambda k: sub_path(k), intermediate))
+    return result
+
   sws = switches.values()
   path_map.clear()
   for k in sws:
+    for j in sws:
+      path_map[k][j]['distance'] = float("inf")
+      path_map[k][j]['intermediate'] = []
+      path_map[k][j]['path'] = {}
     for j,port in adjacency[k].iteritems():
       if port is None: continue
-      path_map[k][j] = (1,None)
-    path_map[k][k] = (0,None) # distance, intermediate
+      path_map[k][j]['distance'] = 1
+      path_map[k][j]['intermediate'] = []
+    path_map[k][k]['distance'] = 0
+    path_map[k][k]['intermediate'] = []
 
-  #dump()
+
+  # dump()
+
 
   for k in sws:
     for i in sws:
       for j in sws:
-        if path_map[i][k][0] is not None:
-          if path_map[k][j][0] is not None:
             # i -> k -> j exists
-            ikj_dist = path_map[i][k][0]+path_map[k][j][0]
-            if path_map[i][j][0] is None or ikj_dist < path_map[i][j][0]:
+            ikj_dist = path_map[i][k]['distance']+path_map[k][j]['distance']
+            if ikj_dist < path_map[i][j]['distance']:
               # i -> k -> j is better than existing
-              path_map[i][j] = (ikj_dist, k)
+              path_map[i][j]['distance'] = ikj_dist
+              path_map[i][j]['intermediate'] = [k]
+
+
+            elif path_map[i][j]['distance'] == ikj_dist:
+             path_map[i][j]['intermediate'].append(k)
+
+  for i in sws:
+    for j in sws:
+      path = __get_path(i,j)
+      if path != None:
+        for every_path in path:
+          newpath =tuple([i] + list(every_path) + [j])
+
+          path_port = []
+          for s1, s2 in zip(newpath[:-1],newpath[1:]):
+            out_port = adjacency[s1][s2]
+            path_port.append((s1,out_port))
+          path_map[i][j]['path'][newpath] = path_port
+
+
+
 
   #print "--------------------"
   #dump()
@@ -138,18 +193,76 @@ def _check_path (p):
       return False
   return True
 
+def _path_selector(src,dst,match):
+  min_weight_in_paths = float('inf')
+  min_congestion_in_max_congestions = float('inf')
 
-def _get_path (src, dst, first_port, final_port):
+  for path,sw_port_congestion in path_map[src][dst]['path'].iteritems():
+    this_path_weight = 0
+    this_path_max_congestion = 0
+    for every_sw_port in sw_port_congestion:
+      this_port_congesion_status = every_sw_port[0].port_congestion[every_sw_port[1]]
+      print every_sw_port[0],this_port_congesion_status
+      this_path_weight += this_port_congesion_status
+      if this_port_congesion_status > this_path_max_congestion:
+        this_path_max_congestion = this_port_congesion_status
+
+    if this_path_max_congestion < min_congestion_in_max_congestions or \
+            (this_path_max_congestion == min_congestion_in_max_congestions and this_path_weight < min_weight_in_paths):
+
+      min_congestion_in_max_congestions = this_path_max_congestion
+      min_weight_in_paths = this_path_weight
+      possible_path = [(path, this_path_weight, this_path_max_congestion)]
+
+    elif this_path_max_congestion == min_congestion_in_max_congestions and this_path_weight == min_weight_in_paths:
+      possible_path.append((path,this_path_weight,this_path_max_congestion))
+
+  if len(possible_path) ==1:
+    return possible_path[0][0]
+  elif possible_path is None:
+    return None
+  else:
+    possible_path_hash_dict = {}
+    possible_path_index = 0
+    for index in xrange(256):
+      possible_path_hash_dict[index] = possible_path[possible_path_index]
+      if possible_path[possible_path_index] is possible_path[-1]:
+        possible_path_index = 0
+      else:
+        possible_path_index += 1
+
+    source_mac = ord(match.dl_src._value[5])
+    dest_mac = ord(match.dl_dst._value[5])
+    hash_result_index = source_mac^dest_mac
+    return possible_path_hash_dict[hash_result_index][0]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def _get_path (src, dst, first_port, final_port, match):
   """
   Gets a cooked path -- a list of (node,in_port,out_port)
   """
   # Start with a raw path...
+  if len(path_map) == 0: _calc_paths()
+
   if src == dst:
     path = [src]
   else:
-    path = _get_raw_path(src, dst)
+    path = _path_selector(src,dst,match)
+    print path
     if path is None: return None
-    path = [src] + path + [dst]
 
   # Now add the ports
   r = []
@@ -243,7 +356,12 @@ class Switch (EventMixin):
     self.dpid = None
     self._listeners = None
     self._connected_at = None
+    self.port_congestion = {}
 
+  def __init_port_congest(self):
+    for port in self.ports:
+      if port.port_no >of.OFPP_MAX: continue
+      self.port_congestion[port.port_no] = 0
   def __repr__ (self):
     return str(self.dpid)
     # return dpid_to_str(self.dpid)
@@ -272,7 +390,7 @@ class Switch (EventMixin):
     """
     Attempts to install a path between this switch and some destination
     """
-    p = _get_path(self, dst_sw, event.port, last_port)
+    p = _get_path(self, dst_sw, event.port, last_port,match)
     if p is None:
       log.warning("Can't get from %s to %s", match.dl_src, match.dl_dst)
 
@@ -416,6 +534,7 @@ class Switch (EventMixin):
     assert self.dpid == connection.dpid
     if self.ports is None:
       self.ports = connection.features.ports
+      self.__init_port_congest()
     self.disconnect()
     log.debug("Connect %s" % (connection,))
     self.connection = connection
@@ -521,6 +640,11 @@ class l2_multi (EventMixin):
       return
     #log.debug("Notify waiting packet %s,%s", event.dpid, event.xid)
     wp.notify(event)
+
+  def _handle_openflow_PortStats(self, event):
+    sw = switches[event.dpid]
+    sw.port_congestion[event.ofp.port_no] = event.ofp.tx_congestion
+    print 'switch is ' + str(event.dpid) + ' port number is ' +str(event.ofp.port_no) + ' congestion bit is ' + str(event.ofp.tx_congestion)
 
   def clear_the_previous(self):
 
