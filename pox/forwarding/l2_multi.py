@@ -144,41 +144,54 @@ def _calc_paths ():
 
   for i in sws:
     for j in sws:
-      path = __get_path(i,j)
-      if path != None:
-        for every_path in path:
-          newpath =tuple([i] + list(every_path) + [j])
+      all_intermediates = __get_path(i,j)
+      if all_intermediates != None:
+        for every_intermediate in all_intermediates:
+          path = tuple([i] + list(every_intermediate) + [j])
 
           path_port = []
-          for s1, s2 in zip(newpath[:-1],newpath[1:]):
+
+          for s1, s2 in zip(path[:-1],path[1:]):
             out_port = adjacency[s1][s2]
             path_port.append((s1,out_port))
-          path_map[i][j]['path'][newpath] = path_port
 
+          this_path_weight = 0
+          for sw,port in path_port:
+            this_port_congesion_status = sw.port_congestion[port]
+            this_path_weight += this_port_congesion_status
 
+          # this_path_weight = reduce(lambda x,y : x + y[0].port_congestion[y[1]], path_port)
 
+          sw, port = max(path_port,key = lambda x: x[0].port_congestion[x[1]])
+          this_path_max_congestion = sw.port_congestion[port]
+          path_congestion_weight = [path,path_port,this_path_max_congestion,this_path_weight]
 
+          for sw, port in path_port:
+            sw.port_to_path[port].append(path_congestion_weight)
+
+          path_map[i][j]['path'][path] = path_congestion_weight
+
+        select_best_path_build_hash_dict(i,j)
   #print "--------------------"
   #dump()
+def select_best_path_build_hash_dict(src,dst):
+  min_congestion_path = min(path_map[src][dst]['path'].itervalues(), key=lambda x: x[2])
+  min_congestion_on_path = min_congestion_path[2]
+  min_congestion_paths = filter(lambda x: x[2] == min_congestion_on_path,path_map[src][dst]['path'].values())
 
+  min_weight_path = min(min_congestion_paths, key=lambda x: x[-1])
+  min_weight_on_path = min_weight_path[-1]
+  min_weight_paths = filter(lambda x: x[-1] == min_weight_on_path,min_congestion_paths)
 
-def _get_raw_path (src, dst):
-  """
-  Get a raw path (just a list of nodes to traverse)
-  """
-  if len(path_map) == 0: _calc_paths()
-  if src is dst:
-    # We're here!
-    return []
-  if path_map[src][dst][0] is None:
-    return None
-  intermediate = path_map[src][dst][1]
-  if intermediate is None:
-    # Directly connected
-    return []
-  return _get_raw_path(src, intermediate) + [intermediate] + \
-         _get_raw_path(intermediate, dst)
-
+  path_map[src][dst]['best_con_weight'] = (min_congestion_on_path,min_weight_on_path)
+  path_map[src][dst]['hash_dict'] = {}
+  possible_path_index = 0
+  for index in xrange(256):
+    path_map[src][dst]['hash_dict'][index] = min_weight_paths[possible_path_index]
+    if min_weight_paths[possible_path_index] is min_weight_paths[-1]:
+      possible_path_index = 0
+    else:
+      possible_path_index += 1
 
 def _check_path (p):
   """
@@ -194,61 +207,10 @@ def _check_path (p):
   return True
 
 def _path_selector(src,dst,match):
-  min_weight_in_paths = float('inf')
-  min_congestion_in_max_congestions = float('inf')
-
-  for path,sw_port_congestion in path_map[src][dst]['path'].iteritems():
-    this_path_weight = 0
-    this_path_max_congestion = 0
-    for every_sw_port in sw_port_congestion:
-      this_port_congesion_status = every_sw_port[0].port_congestion[every_sw_port[1]]
-      print every_sw_port[0],this_port_congesion_status
-      this_path_weight += this_port_congesion_status
-      if this_port_congesion_status > this_path_max_congestion:
-        this_path_max_congestion = this_port_congesion_status
-
-    if this_path_max_congestion < min_congestion_in_max_congestions or \
-            (this_path_max_congestion == min_congestion_in_max_congestions and this_path_weight < min_weight_in_paths):
-
-      min_congestion_in_max_congestions = this_path_max_congestion
-      min_weight_in_paths = this_path_weight
-      possible_path = [(path, this_path_weight, this_path_max_congestion)]
-
-    elif this_path_max_congestion == min_congestion_in_max_congestions and this_path_weight == min_weight_in_paths:
-      possible_path.append((path,this_path_weight,this_path_max_congestion))
-
-  if len(possible_path) ==1:
-    return possible_path[0][0]
-  elif possible_path is None:
-    return None
-  else:
-    possible_path_hash_dict = {}
-    possible_path_index = 0
-    for index in xrange(256):
-      possible_path_hash_dict[index] = possible_path[possible_path_index]
-      if possible_path[possible_path_index] is possible_path[-1]:
-        possible_path_index = 0
-      else:
-        possible_path_index += 1
-
-    source_mac = ord(match.dl_src._value[5])
-    dest_mac = ord(match.dl_dst._value[5])
-    hash_result_index = source_mac^dest_mac
-    return possible_path_hash_dict[hash_result_index][0]
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+  source_mac = ord(match.dl_src._value[5])
+  dest_mac = ord(match.dl_dst._value[5])
+  hash_result_index = source_mac^dest_mac
+  return path_map[src][dst]['hash_dict'][hash_result_index][0]
 
 def _get_path (src, dst, first_port, final_port, match):
   """
@@ -261,7 +223,6 @@ def _get_path (src, dst, first_port, final_port, match):
     path = [src]
   else:
     path = _path_selector(src,dst,match)
-    print path
     if path is None: return None
 
   # Now add the ports
@@ -357,11 +318,37 @@ class Switch (EventMixin):
     self._listeners = None
     self._connected_at = None
     self.port_congestion = {}
+    self.port_to_path = {}
 
-  def __init_port_congest(self):
+  def __init_port_congestion_and_port_to_path(self):
     for port in self.ports:
       if port.port_no >of.OFPP_MAX: continue
       self.port_congestion[port.port_no] = 0
+      self.port_to_path[port.port_no] = []
+
+
+  def update_congestion_path(self,port):
+    new_congestion = self.port_congestion[port]
+    for path in self.port_to_path[port]:
+
+      src = path[0][0]
+      dest = path[0][-1]
+      this_path_best_con,this_path_best_weight = path_map[src][dest]['best_con_weight']
+
+      new_path_weight = 0
+      for sw,port in path[1]:
+        this_port_congesion_status = sw.port_congestion[port]
+        new_path_weight += this_port_congesion_status
+      path[3] = new_path_weight
+      if new_congestion > path[2]:
+        path[2] = new_congestion
+        if new_congestion < this_path_best_con or (new_congestion == this_path_best_con and new_path_weight <= this_path_best_weight):
+          select_best_path_build_hash_dict(src,dest)
+
+
+
+
+
   def __repr__ (self):
     return str(self.dpid)
     # return dpid_to_str(self.dpid)
@@ -534,7 +521,7 @@ class Switch (EventMixin):
     assert self.dpid == connection.dpid
     if self.ports is None:
       self.ports = connection.features.ports
-      self.__init_port_congest()
+      self.__init_port_congestion_and_port_to_path()
     self.disconnect()
     log.debug("Connect %s" % (connection,))
     self.connection = connection
@@ -642,9 +629,14 @@ class l2_multi (EventMixin):
     wp.notify(event)
 
   def _handle_openflow_PortStats(self, event):
+
     sw = switches[event.dpid]
-    sw.port_congestion[event.ofp.port_no] = event.ofp.tx_congestion
-    print 'switch is ' + str(event.dpid) + ' port number is ' +str(event.ofp.port_no) + ' congestion bit is ' + str(event.ofp.tx_congestion)
+    port = event.ofp.port_no
+    if _is_edge_port_in_topo(sw,port):
+      return
+    sw.port_congestion[port] = event.ofp.tx_congestion
+    sw.update_congestion_path(port)
+
 
   def clear_the_previous(self):
 
