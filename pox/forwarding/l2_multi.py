@@ -64,8 +64,8 @@ waiting_paths = {}
 FLOOD_HOLDDOWN = 5
 
 # Flow timeouts
-FLOW_IDLE_TIMEOUT = 30
-FLOW_HARD_TIMEOUT = 100
+FLOW_IDLE_TIMEOUT = 10
+FLOW_HARD_TIMEOUT = 30
 
 # How long is allowable to set up a path?
 PATH_SETUP_TIME = 4
@@ -333,7 +333,6 @@ class Switch (EventMixin):
 
       src = path[0][0]
       dest = path[0][-1]
-      this_path_best_con,this_path_best_weight = path_map[src][dest]['best_con_weight']
 
       new_path_weight = 0
       for sw,port in path[1]:
@@ -342,8 +341,7 @@ class Switch (EventMixin):
       path[3] = new_path_weight
       if new_congestion > path[2]:
         path[2] = new_congestion
-        if new_congestion < this_path_best_con or (new_congestion == this_path_best_con and new_path_weight <= this_path_best_weight):
-          select_best_path_build_hash_dict(src,dest)
+      select_best_path_build_hash_dict(src,dest)
 
 
 
